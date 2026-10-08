@@ -1,0 +1,140 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Research Assistant</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+:root{--ink:#16202a;--mute:#5d6b79;--line:#d9dee4;--soft:#eef1f4;--accent:#1f6f78;--bad:#b3261e;--ok:#1d7a46}
+@media (prefers-color-scheme:dark){:root{--ink:#e6ebf0;--mute:#93a1b0;--line:#27313d;--soft:#1c242e;--accent:#4fb3bd;--bad:#ff8f86;--ok:#6fd49a}body{background:#151b23}}
+*{box-sizing:border-box}
+body{margin:0;padding:12px;color:var(--ink);font:13px/1.45 "Segoe UI",system-ui,sans-serif}
+h1{font-size:14px;margin:0 0 8px}
+label{display:block;margin:8px 0 2px;color:var(--mute);font-size:12px}
+input{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--ink);font:inherit}
+button{border:1px solid var(--line);background:var(--soft);color:var(--ink);border-radius:7px;padding:7px 12px;cursor:pointer;font:inherit;margin:6px 6px 0 0}
+button.p{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600}
+button:disabled{opacity:.55;cursor:default}
+button:focus-visible,input:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.card{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--soft);word-break:break-word}
+.mute{color:var(--mute);font-size:12px}
+#msg{margin-top:10px;min-height:18px}
+#msg.err{color:var(--bad)}#msg.ok{color:var(--ok)}
+a{color:var(--accent);cursor:pointer}
+#main{display:none}
+</style>
+</head>
+<body>
+<h1>AI Research Assistant</h1>
+
+<div id="cfg">
+  <p class="mute">One-time setup. These values stay in this Outlook add-in on this device only.</p>
+  <label for="url">Assistant web app URL (ends with /exec)</label>
+  <input id="url" placeholder="https://script.google.com/macros/s/.../exec">
+  <label for="tok">Access token</label>
+  <input id="tok" type="password" autocomplete="off" placeholder="From setupAccessToken()">
+  <button class="p" id="bSave">Save</button>
+</div>
+
+<div id="main">
+  <div class="card" id="prev">Open an email to send it.</div>
+  <button class="p" id="bSel" data-tip="Send only the text you highlighted">Send selected text</button>
+  <button id="bAll">Send full email</button>
+  <button id="bOpen">Open assistant</button>
+  <div id="msg" role="status"></div>
+  <p class="mute">Read-only: the email is copied to your assistant. Nothing is sent, replied, moved or deleted in your mailbox.</p>
+  <a id="bReset">Change URL or token</a>
+</div>
+
+<script>
+var item = null;
+var $ = function (id) { return document.getElementById(id); };
+function store(k, v) { try { if (v === undefined) return localStorage.getItem(k) || ''; localStorage.setItem(k, v); } catch (e) { return ''; } return v; }
+function say(t, kind) { var m = $('msg'); m.textContent = t; m.className = kind || ''; }
+function showCfg(on) { $('cfg').style.display = on ? 'block' : 'none'; $('main').style.display = on ? 'none' : 'block'; }
+
+Office.onReady(function () {
+  $('url').value = store('ara_url'); $('tok').value = store('ara_tok');
+  showCfg(!(store('ara_url') && store('ara_tok')));
+  refresh();
+  try { Office.context.mailbox.addHandlerAsync(Office.EventType.ItemChanged, refresh); } catch (e) {}
+});
+
+$('bSave').onclick = function () {
+  var u = $('url').value.trim(), t = $('tok').value.trim();
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(u)) { say('Enter the full web app URL ending with /exec.', 'err'); showCfg(true); return; }
+  if (!t) { say('Enter the access token.', 'err'); return; }
+  store('ara_url', u); store('ara_tok', t); say('Saved.', 'ok'); showCfg(false);
+};
+$('bReset').onclick = function () { showCfg(true); };
+$('bOpen').onclick = function () {
+  var u = store('ara_url');
+  try { Office.context.ui.openBrowserWindow(u); } catch (e) { window.open(u, '_blank'); }
+};
+
+function refresh() {
+  item = Office.context.mailbox.item;
+  if (!item) { $('prev').textContent = 'Open an email to send it.'; return; }
+  var from = item.from ? (item.from.displayName || item.from.emailAddress) : '';
+  $('prev').innerHTML = '<b></b><br><span class="mute"></span>';
+  $('prev').firstChild.textContent = item.subject || '(no subject)';
+  $('prev').lastChild.textContent = from;
+  say('');
+}
+
+function addr(a) { return a ? (a.displayName ? a.displayName + ' <' + a.emailAddress + '>' : a.emailAddress) : ''; }
+function getBody(cb) {
+  item.body.getAsync(Office.CoercionType.Text, function (r) { cb(r.status === Office.AsyncResultStatus.Succeeded ? (r.value || '') : ''); });
+}
+function getSel(cb) {
+  if (!item.getSelectedDataAsync) { cb(''); return; }
+  item.getSelectedDataAsync(Office.CoercionType.Text, function (r) {
+    cb(r.status === Office.AsyncResultStatus.Succeeded && r.value && r.value.data ? String(r.value.data) : '');
+  });
+}
+
+function send(selectedOnly) {
+  item = Office.context.mailbox.item;
+  if (!item) { say('Open an email first.', 'err'); return; }
+  if (!store('ara_url') || !store('ara_tok')) { showCfg(true); return; }
+  $('bSel').disabled = $('bAll').disabled = true;
+  say('Reading email...');
+  var go = function (text, selected) {
+    if (!text.trim()) { done('Nothing to send. ' + (selected ? 'Highlight some text first.' : 'The email body is empty.'), 'err'); return; }
+    var d = item.dateTimeCreated;
+    var payload = {
+      token: store('ara_tok'),
+      subject: item.subject || '',
+      sender: addr(item.from),
+      recipients: (item.to || []).map(addr).join('; '),
+      date: d ? new Date(d).toISOString().substring(0, 16).replace('T', ' ') + ' UTC' : '',
+      selected: selected,
+      text: text
+    };
+    post(payload);
+  };
+  if (selectedOnly) getSel(function (s) { go(s, true); });
+  else getBody(function (b) { go(b, false); });
+}
+
+function done(m, kind) { say(m, kind); $('bSel').disabled = $('bAll').disabled = false; }
+
+function post(payload) {
+  say('Sending to your assistant...');
+  var url = store('ara_url');
+  var opts = { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(payload) };
+  fetch(url, opts).then(function (r) { return r.json(); }).then(function (j) {
+    if (j && j.ok) done('Sent. Open the assistant and press Research.', 'ok');
+    else done((j && j.error) || 'The assistant rejected the request.', 'err');
+  }).catch(function () {
+    // The request may have reached the server even if the browser blocked reading the reply (no resend, to avoid duplicates).
+    done('Sent, but the reply could not be read. Open the assistant to check; if the email is missing, send it again.', 'ok');
+  });
+}
+
+$('bSel').onclick = function () { send(true); };
+$('bAll').onclick = function () { send(false); };
+</script>
+</body>
+</html>
